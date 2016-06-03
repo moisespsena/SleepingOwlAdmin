@@ -14,6 +14,7 @@ use Illuminate\Routing\Controller;
 use SleepingOwl\Admin\Contracts\Display\ColumnEditableInterface;
 use SleepingOwl\Admin\Contracts\FormInterface;
 use SleepingOwl\Admin\DataProvider\Configuration;
+use SleepingOwl\Admin\DataProvider\Env;
 use SleepingOwl\Admin\Model\ModelConfiguration;
 use SleepingOwl\Admin\Utils\Invoker;
 
@@ -438,7 +439,8 @@ class AdminController extends Controller
      * @param string $title
      * @param string $parent
      */
-    public function dataProvider(ModelConfiguration $model, Request $request)
+    public function dataProvider(ModelConfiguration $model,
+                                 \Illuminate\Http\Request $request)
     {
         $dp = app('sleeping_owl.data_provider');
         $cls = $model->getClass();
@@ -456,18 +458,29 @@ class AdminController extends Controller
 
         // create a query
         $query = $model->getRepository()->getQuery();
+        
+        $env = new Env();
+        $env->itemFormatter = $request->input('_dp_format', '');
+        $env->responseFormatter = $request->input('_dp_responseFormat', '');
+        $env->withChildren = $request->input('_dp_withChildren') == 'true';
+        $env->model = & $model;
+        $env->cfg = & $cfg;
+        $env->request = & $request;
+        $env->query = & $query;
+        $env->items = null;
 
         // the default invoker params instance resolver
-        $pmap = [
+        $env->parametersMap = [
             ModelConfiguration::class => $model,
             Configuration::class => $cfg,
-            Request::class => $request,
+            \Illuminate\Http\Request::class => $request,
+            Env::class => $env
         ];
 
         // the invoker
-        $invoke = function &($handler, $args) use (&$pmap) {
+        $invoke = function &($handler, $args = []) use (& $env) {
             return Invoker::create($handler, $args)
-                ->setDependencyProviderByRef($pmap)->invoke();
+                ->setDependencyProviderByRef($env->parametersMap)->invoke();
         };
 
         // aplly the query handler if has be set
@@ -476,9 +489,9 @@ class AdminController extends Controller
         }
 
         // the response info
-        $info = [];
+        $env->info = [];
 
-        $id = Request::input('id');
+        $id = $request->input('id');
 
         if (! is_null($id)) {
             if (strlen($id) == 0) {
@@ -488,32 +501,32 @@ class AdminController extends Controller
             $id = explode(',', $id);
 
             if (count($id) == 1) {
-                $data = $query->find($id[0]);
-                $data = is_null($data) ? [] : [$data];
+                $env->items = $query->find($id[0]);
+                $env->items = is_null($env->items) ? [] : [$env->items];
             } else {
-                $data = $query->findMany($id)->all();
+                $env->items = $query->findMany($id)->all();
             }
 
             if ($cfg->isAll()) {
                 if ($cfg->isRecordsCount()) {
-                    $info['total'] = count($data);
+                    $env->info['total'] = count($env->items);
                 }
             } else {
-                $info = array_merge($info, [
-                    'total' => count($data),
+                $env->info = array_merge($env->info, [
+                    'total' => count($env->items),
                     'per_page' => $cfg->perPage(),
                     'current_page' => 1,
                     'last_page' => 1,
                     'next_page_url' => null,
                     'prev_page_url' => null,
                     'from' => 1,
-                    'to' => count($data),
+                    'to' => count($env->items),
                 ]);
             }
         } else {
             // if count records
             if ($cfg->isTotalize()) {
-                $info['totalCount'] = $query->count();
+                $env->info['totalCount'] = $query->count();
             }
 
             // apply all filters
@@ -524,20 +537,20 @@ class AdminController extends Controller
             // if searchable by TERM, apply it
             if ($cfg->isSearchable()
                 && ! is_null($handler = $cfg->getSearchHandler())
-                && ! empty($q = Request::input($cfg->getSearchParam(), ''))
+                && ! empty($env->term = $request->input($cfg->getSearchParam(), ''))
             ) {
-                $query = $invoke($handler, [$query, &$q]);
+                $query = $invoke($handler, [$query, $env->term]);
             }
 
             // all records, without pagination
             if ($cfg->isAll()) {
                 if ($cfg->isRecordsCount()) {
-                    $info['total'] = $query->count();
+                    $env->info['total'] = $query->count();
                 }
-                $data = $query->get()->all();
+                $env->items = $query->get()->all();
             } else {
                 $results = $query->paginate($cfg->perPage());
-                $info = array_merge($info, [
+                $env->info = array_merge($env->info, [
                     'total' => $results->total(),
                     'per_page' => $results->perPage(),
                     'current_page' => $results->currentPage(),
@@ -547,48 +560,68 @@ class AdminController extends Controller
                     'from' => $results->firstItem(),
                     'to' => $results->lastItem(),
                 ]);
-                $data = $results->items();
+                $env->items = $results->items();
                 unset($results);
             }
         }
 
-        array_walk($data, function (Model $e) use ($cfg) {
+        array_walk($env->items, function (Model $e) use ($cfg) {
             $e->addHidden($cfg->getHidden());
             $e->fillable(array_merge($cfg->getFillable()));
         });
 
-        if (! empty($formatterName = Request::input('_dp_format', ''))) {
-            if (! is_null($formatter = $cfg->getItemFormatter($formatterName))) {
-                array_walk($data, function (&$e) use ($formatter, $invoke) {
-                    return $invoke($formatter, [&$e]);
-                });
+        if (! is_null($handler = $cfg->getPreItemsFormatHandler())) {
+            $invoke($handler);
+        }
+
+        if (! empty($env->itemFormatter)) {
+            if (! is_null($formatter = $cfg->getItemFormatter($env->itemFormatter))) {
+                $itemFormatter = $invoke($formatter);
+                array_walk($env->items, $itemFormatter);
             } else {
-                abort(400, "Unknow format '$formatterName'.");
+                abort(400, "Unknow format '{$env->itemFormatter}'.");
             }
         }
 
-        if (! empty($formatterName = Request::input('_dp_responseFormat', ''))) {
-            if (is_null($formatter = $cfg->getResponseFormatter($formatterName))) {
-                abort(400, "Unknow response format '$formatterName'.");
+        if (! is_null($handler = $cfg->getPostItemsFormatHandler())) {
+            $invoke($handler);
+        }
+
+        if (! empty($env->responseFormatter)) {
+            if (is_null($formatter = $cfg->getResponseFormatter($env->responseFormatter))) {
+                abort(400, "Unknow response format '{$env->responseFormatter}'.");
             }
         } else {
-            $formatter = function &(&$data, &$info) {
-                $r = ['items' => &$data];
+            $formatter = function &(& $items, & $info) {
+                $r = ['items' => & $items];
 
                 if (! empty($info)) {
-                    $r['info'] = &$info;
+                    $r['info'] = & $info;
                 }
 
                 return $r;
             };
         }
 
-        $result = $invoke($formatter, [&$data, &$info]);
-
-        if (! is_null($handler = $cfg->getPostFormatHandler())) {
-            $invoke($handler, [&$result, &$info]);
+        if (! is_null($handler = $cfg->getPreResponseFormatHandler())) {
+            $invoke($handler);
         }
 
-        return response()->json($result);
+        $result = $invoke($formatter, [& $env->items, & $env->info]);
+        $env->result = & $result;
+
+        if (! is_null($handler = $cfg->getPostResponseFormatHandler())) {
+            $invoke($handler);
+        }
+
+        $jsonCallback = $request->input('callback');
+
+        $r = response()->json($result);
+
+        if (! empty($jsonCallback)) {
+            $r = $r->callback($jsonCallback);
+        }
+
+        return $r;
     }
 }

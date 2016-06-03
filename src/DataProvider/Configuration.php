@@ -2,7 +2,8 @@
 
 namespace SleepingOwl\Admin\DataProvider;
 
-use Request;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Http\Request;
 use SleepingOwl\Admin\Utils\Invoker;
 use Illuminate\Database\Eloquent\Builder;
 
@@ -27,7 +28,13 @@ class Configuration
     protected $responseFormatters = [];
     protected $totalize = true;
     /** @var callable */
-    protected $postFormatHandler;
+    protected $preResponseFormatHandler;
+    /** @var callable */
+    protected $postResponseFormatHandler;
+    /** @var callable */
+    protected $preItemsFormatHandler;
+    /** @var callable */
+    protected $postItemsFormatHandler;
     protected $fetchColumns = [];
 
     public function __construct($modelClass)
@@ -400,6 +407,11 @@ class Configuration
      *     @var string $key required. If is `true` and request param value is
      *                       `null`, aborts with HTTP 400 status. Default is
      *                       `false`.
+     *     @var bool $key blank. If is `false` and request param value is
+     *                           `null` or empty, the handler will not be called.
+     *                           Default is `false`.
+     *     @var string $key default. Default **param** value if not **required**
+     *                               and value is `null` or length of value is 0.
      * }
      * @return Configuration
      */
@@ -410,27 +422,40 @@ class Configuration
             'param' => $fieldName,
             'formatter' => null,
             'required' => false,
+            'blank' => true,
+            'default' => null,
         ], $options);
 
-        return $this->setFilter('field:'.$fieldName,
-            function (Builder $query, Invoker $invoker) use ($fieldName, $options) {
-                $value = Request::input($options['param']);
+        return $this->setFilter('field:'.data_get($options, 'name', $fieldName),
+            function (Builder $query, Invoker $invoker, Request $request) use ($fieldName, $options) {
+                $value = $request->input($options['param']);
+
+                if (is_null($value)) {
+                    if ($options['required']) {
+                        abort(400, "Parameter '{$options['param']}' is empty.");
+                    } else {
+                        $value = $options['default'];
+                    }
+                }
+
+                if (is_null($value) || strlen($value) == 0) {
+                    if (! $options['blank']) {
+                        return $query;
+                    }
+                    else if (! is_null($options['default'])) {
+                        $value = $options['default'];
+                    }
+                }
 
                 if (! is_null($options['formatter'])) {
                     $value = Invoker::create(
                         $options['formatter'],
-                        [$value]
-                    )->setDependencyProviderByRef($invoker->getDefaults())
+                        [&$value]
+                    )
+                        ->setDependencyProviderByRef(
+                            $invoker->getDependencyProviderByRef()
+                        )
                         ->invoke();
-                }
-
-                if (is_null($value) || (is_string($value)
-                        && strlen($value) == 0)) {
-                    if ($options['required']) {
-                        abort(400, "Parameter '{$options['param']}' is empty.");
-                    }
-
-                    return $query;
                 }
 
                 return $query->where($fieldName, $options['op'], $value);
@@ -449,13 +474,14 @@ class Configuration
     public function likeFieldFilter($fieldName, array $options = [])
     {
         $options = array_merge($options, [
-            'op' => 'like',
+            'op' => 'ilike',
+            'blank' => false,
             'formatter' => function (&$value) {
                 return '%'.$value.'%';
             },
         ]);
 
-        return $this->addFieldFilter($fieldName, $options);
+        return $this->setFieldFilter($fieldName, $options);
     }
 
     /**
@@ -659,37 +685,131 @@ class Configuration
      *                                   representative text.
      * @return Configuration
      */
-    public function setIdTextItemFormatter($formatter)
+    public function setItemTupleFormatter($formatter)
     {
         if (is_string($formatter)) {
-            $formatter = function (&$e) use ($formatter) {
-                return data_get($e, $formatter);
+            $formatter = function (&$e, $set) use ($formatter) {
+                $set(data_get($e, $formatter));
             };
         }
 
         return $this->setItemFormatter(
-            'idtext',
-            function (&$e, Invoker $ivk) use ($formatter) {
-                $e = [$e->id, $ivk->bridge($formatter)->invoke()];
+            'tuple',
+            function (Env $env) use ($formatter) {
+                $le = new \stdClass();
+                $le->model = null;
+                $le->item = null;
+                $le->i = 0;
+
+                $set = function ($text, $children=null) use ($le) {
+                    $item = [
+                        $le->model->getAttribute($le->model->getKeyName()),
+                        $text
+                    ];
+
+                    if (! is_null($children)) {
+                        $item[] = $children;
+                    }
+
+                    $le->item = $item;
+                };
+
+                return function(& $model, $i) use ($set, $formatter, $le) {
+                    $le->model = $model;
+                    $le->item = null;
+                    $le->i = $i;
+                    $formatter($model, $set);
+                    $model = $le->item;
+                };
             }
         );
     }
 
     /**
-     * @return callable
+     * Alias of {@see Configuration::setItemTupleFormatter()}
+     * @param $formatter
+     * @see Configuration::setItemTupleFormatter()
+     * @deprecated
      */
-    public function getPostFormatHandler()
+    public function setIdTextItemFormatter($formatter)
     {
-        return $this->postFormatHandler;
+        return $this->setItemTupleFormatter($formatter);
     }
 
     /**
-     * @param callable $postFormatHandler
+     * @return callable
+     */
+    public function getPreItemsFormatHandler()
+    {
+        return $this->preItemsFormatHandler;
+    }
+
+    /**
+     * @param callable $preItemsFormatHandler
      * @return Configuration
      */
-    public function setPostFormatHandler($postFormatHandler)
+    public function setPreItemsFormatHandler($preItemsFormatHandler)
     {
-        $this->postFormatHandler = $postFormatHandler;
+        $this->preItemsFormatHandler = $preItemsFormatHandler;
+
+        return $this;
+    }
+
+    /**
+     * @return callable
+     */
+    public function getPostItemsFormatHandler()
+    {
+        return $this->postItemsFormatHandler;
+    }
+
+    /**
+     * @param callable $postItemsFormatHandler
+     * @return Configuration
+     */
+    public function setPostItemsFormatHandler($postItemsFormatHandler)
+    {
+        $this->postItemsFormatHandler = $postItemsFormatHandler;
+
+        return $this;
+    }
+
+
+
+    /**
+     * @return callable
+     */
+    public function getPreResponseFormatHandler()
+    {
+        return $this->preResponseFormatHandler;
+    }
+
+    /**
+     * @param callable $preResponseFormatHandler
+     * @return Configuration
+     */
+    public function setPreResponseFormatHandler($preResponseFormatHandler)
+    {
+        $this->preResponseFormatHandler = $preResponseFormatHandler;
+
+        return $this;
+    }
+
+    /**
+     * @return callable
+     */
+    public function getPostResponseFormatHandler()
+    {
+        return $this->postResponseFormatHandler;
+    }
+
+    /**
+     * @param callable $postResponseFormatHandler
+     * @return Configuration
+     */
+    public function setPostResponseFormatHandler($postResponseFormatHandler)
+    {
+        $this->postResponseFormatHandler = $postResponseFormatHandler;
 
         return $this;
     }

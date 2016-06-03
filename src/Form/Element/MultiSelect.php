@@ -32,6 +32,7 @@ class MultiSelect extends Select
     public function getValue()
     {
         $value = parent::getValue();
+
         if ($value instanceof Collection && $value->count() > 0) {
             $value = $value->pluck($value->first()->getKeyName())->all();
         }
@@ -84,20 +85,14 @@ class MultiSelect extends Select
      */
     public function toArray()
     {
-        $attributes = [
-            'id' => $this->getName(),
-            'class' => 'form-control input-select',
-            'multiple',
-        ];
+        $result = parent::toArray() + ['tagable' => $this->isTaggable()];
+        $result['attributes'][] = 'multiple';
 
         if ($this->isTaggable()) {
-            $attributes['class'] .= ' input-taggable';
+            $result['attributes']['class'] .= ' input-taggable';
         }
 
-        return [
-            'tagable' => $this->isTaggable(),
-            'attributes' => $attributes,
-        ] + parent::toArray();
+        return $result;
     }
 
     public function save()
@@ -109,7 +104,7 @@ class MultiSelect extends Select
 
     public function afterSave()
     {
-        if (is_null($this->getModelForOptions())) {
+        if (is_null($modelfo = $this->getModelForOptions())) {
             return;
         }
 
@@ -124,13 +119,17 @@ class MultiSelect extends Select
         $relation = $this->getModel()->{$attribute}();
 
         if ($relation instanceof \Illuminate\Database\Eloquent\Relations\BelongsToMany) {
-            foreach ($values as $i => $value) {
-                if (! array_key_exists($value, $this->getOptions()) and $this->isTaggable()) {
-                    $model = clone $this->getModelForOptions();
-                    $model->{$this->getDisplay()} = $value;
-                    $model->save();
+            if ($this->isTaggable()) {
+                $options = $this->getOptions();
 
-                    $values[$i] = $model->getKey();
+                foreach ($values as $i => $value) {
+                    if (! array_key_exists($value, $options)) {
+                        $model = clone $modelfo;
+                        $model->{$this->getDisplay()} = $value;
+                        $model->save();
+
+                        $values[$i] = $model->getKey();
+                    }
                 }
             }
 
@@ -149,7 +148,7 @@ class MultiSelect extends Select
 
             foreach ($values as $i => $value) {
                 /** @var Model $model */
-                $model = clone $this->getModelForOptions();
+                $model = clone $modelfo;
                 $item = $model->find($value);
 
                 if (is_null($item)) {

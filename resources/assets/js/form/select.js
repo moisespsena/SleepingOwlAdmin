@@ -1,7 +1,7 @@
 $(function () {
     $('.input-select').each(function () {
         var $self = $(this);
-        
+
         if ($self.data('select2')) {
             return;
         }
@@ -34,7 +34,38 @@ $(function () {
                     value: null,
                     findByIdUrl: null,
                     idParam: 'id',
-                    idParamSep: ','
+                    idParamSep: ',',
+                    isItemTuple: false,
+                    prepareItems: function (e) {
+                        var items = e.items, item;
+
+                        for (var i = 0; i < items.length; i++) {
+                            e.item = items[i];
+                            e.itemIndex = i;
+                            items[i] = e.prepareItem(e);
+                        }
+
+                        items.filter(function (item) {
+                            return item && (item.id || item.children);
+                        });
+
+                        return items;
+                    },
+                    prepareItem: function (e) {
+                        return e.item;
+                    },
+                    prepareItemTuple: function (e) {
+                        var item = e.item, newItem = {
+                            id: item[0],
+                            text: item[1]
+                        };
+
+                        if (item.length == 3) {
+                            newItem.children = item[2]
+                        }
+
+                        return newItem;
+                    }
                 }, dynOptions), dep, k;
 
                 if (r.static && !$.isArray(r.static)) {
@@ -168,7 +199,8 @@ $(function () {
 
                         try {
                             delete r._query;
-                        } catch (err) {}
+                        } catch (err) {
+                        }
 
                         dynOptions.dependencies.prepare(r);
 
@@ -181,25 +213,62 @@ $(function () {
                         // scrolling can be used
                         params.page = params.page || 1;
 
-                        var itemsProperty = dynOptions.itemsProperty.split('.');
-                        var items = data;
+                        var itemsProperty = dynOptions.itemsProperty.split('.'),
+                            total = eval('data.' + dynOptions.totalCountProperty),
+                            items = data,
+                            i;
 
-                        for (var i = 0; i < itemsProperty.length; i++) {
+                        for (i = 0; i < itemsProperty.length; i++) {
                             items = items[itemsProperty[i]];
                         }
 
-                        var total = eval('data.' + dynOptions.totalCountProperty);
+                        var preparer = {
+                            options: dynOptions,
+                            data: data,
+                            params: params,
+                            prepareItem: (dynOptions.isItemTuple ?
+                                dynOptions.prepareItemTuple :
+                                dynOptions.prepareItem),
+                            prepareItems: function (e, items) {
+                                var item, newItem, parentItem = e.parentItem;
 
-                        if (items.length > 0) {
-                            if ($.isArray(items[0])) {
-                                for (i = 0; i < items.length; i++) {
-                                    items[i] = {
-                                        id: items[i][0],
-                                        text: items[i][1]
+                                for (var i = 0; i < items.length; i++) {
+                                    item = e.item = items[i];
+                                    e.itemIndex = i;
+
+                                    newItem = e.prepareItem(e);
+
+                                    if (newItem) {
+                                        if (newItem.children) {
+                                            e.parentItem = newItem;
+                                            newItem.children = e.prepareItems(e, newItem.children);
+                                            e.parentItem = parentItem;
+
+                                            if (!newItem.children) {
+                                                newItem = null;
+                                            }
+                                        }
+                                        else if (!newItem.id) {
+                                            newItem = null;
+                                        }
+
+                                        if (newItem && !newItem.text) {
+                                            newItem.text = '** EMPTY LABEL **';
+                                        }
+
+                                        items[i] = newItem;
                                     }
                                 }
+
+                                items = items.filter(function (item) {
+                                    return item;
+                                });
+
+                                return items;
                             }
-                        }
+                        };
+
+                        items = preparer.prepareItems(preparer, items);
 
                         return {
                             results: items,
@@ -244,32 +313,56 @@ $(function () {
                 dynOptions.value.join(dynOptions.idParamSep) :
                 dynOptions.value.toString());
 
+            if (dynOptions.minInputLength > 0) {
+
+            }
+
+            if (s.dataAdapter.minimumInputLength) {
+                s.dataAdapter.minimumInputLength *= -1;
+            }
+
             s.dataAdapter.query(params, function (results) {
-                var r;
+                var r = [], proccessItem;
+
+                if (s.dataAdapter.minimumInputLength < 0) {
+                    s.dataAdapter.minimumInputLength *= -1;
+                }
 
                 if ($.isArray(dynOptions.value)) {
-                    var map = {};
+                    proccessItem = function(i, item) {
+                        if (map.hasOwnProperty(item.id)) {
+                            r[r.length] = item;
+                        }
 
-                    $.each(dynOptions.value, function (i, value) {
-                        map[value.id] = true;
-                    });
-
-                    r = results.results.filter(function (item) {
-                        return map.hasOwnProperty(item.id);
-                    });
+                        if (item.children) {
+                            $.each(item.children, proccessItem);
+                        }
+                    };
                 } else {
-                    r = results.results.filter(function (item) {
-                        return dynOptions.value == item.id;
-                    });
+                    proccessItem = function(i, item) {
+                        if (dynOptions.value == item.id) {
+                            r[r.length] = item;
+                        }
+
+                        if (item.children) {
+                            $.each(item.children, proccessItem);
+                        }
+                    };
                 }
 
-                if (r.length == 1) {
-                    r = r[0];
-                }
+                var map = {};
 
-                if (r) {
-                    s.selection.container.trigger('select', {data: r});
-                }
+                $.each(dynOptions.value, function (i, value) {
+                    if (value !== null) {
+                        map[value] = value;
+                    }
+                });
+
+                $.each(results.results, proccessItem);
+
+                $.each(r, function(i, value) {
+                    s.selection.container.trigger('select', {data: value});
+                });
             });
         }
     });

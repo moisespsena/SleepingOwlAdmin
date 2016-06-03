@@ -608,7 +608,13 @@ class Select extends NamedFormElement
                 }
 
                 if (empty($dynamicOptions['_dp.format'])) {
-                    $dynamicOptions['params']['_dp.format'] = 'idtext';
+                    $dynamicOptions['params']['_dp.format'] = 'tuple';
+                    $dynamicOptions['isItemTuple'] = true;
+                }
+
+                if (! array_key_exists('childrens',
+                    $dynamicOptions['params'])) {
+                    $dynamicOptions['params']['_dp.withChildren'] = 'true';
                 }
             }
 

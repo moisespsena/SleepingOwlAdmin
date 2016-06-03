@@ -76,6 +76,24 @@ class Invoker
     }
 
     /**
+     * Return the parameters dependency provider.
+     * @return array
+     */
+    public function getDependencyProvider()
+    {
+        return $this->dependencyProvider;
+    }
+
+    /**
+     * Return the parameters dependency provider by reference.
+     * @return array
+     */
+    public function &getDependencyProviderByRef()
+    {
+        return $this->dependencyProvider;
+    }
+
+    /**
      * Set the parameters dependency provider map.
      *
      * The maps is a `Type` as key and value is a `Type` object.
